@@ -26,6 +26,7 @@ func main() {
 
 	app := &cli.App{
 		Store:     &storeAdapter{vm: vm},
+		Bulk:      &bulkAdapter{vm: vm},
 		Vaults:    &vaultAdapter{vm: vm},
 		Clipboard: cb,
 	}
@@ -77,4 +78,37 @@ func (v *vaultAdapter) Active() (string, error) {
 
 func (v *vaultAdapter) Switch(name string) error {
 	return v.vm.Switch(name)
+}
+
+// bulkAdapter bridges vault.Manager to the cli.BulkStore interface.
+type bulkAdapter struct {
+	vm *vault.Manager
+}
+
+func (b *bulkAdapter) Get(vaultName, key string) (string, error) {
+	return b.vm.Get(key, vaultName)
+}
+
+func (b *bulkAdapter) Set(vaultName, key, value string) error {
+	return b.vm.Set(key, value, vaultName)
+}
+
+func (b *bulkAdapter) Delete(vaultName, key string) error {
+	return b.vm.Delete(key, vaultName)
+}
+
+func (b *bulkAdapter) List(vaultName string) ([]string, error) {
+	return b.vm.ListKeys(vaultName)
+}
+
+func (b *bulkAdapter) BulkSet(entries map[string]string, vaultName string) (int, error) {
+	return b.vm.BulkSet(entries, vaultName)
+}
+
+func (b *bulkAdapter) GetAll(vaultName string) (map[string]string, error) {
+	return b.vm.GetAllKeys(vaultName)
+}
+
+func (b *bulkAdapter) ReadRawService(service string) (map[string]string, error) {
+	return b.vm.ReadRawService(service)
 }

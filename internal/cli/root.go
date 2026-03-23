@@ -12,6 +12,7 @@ var Version = "dev"
 // App holds injected dependencies for all CLI commands.
 type App struct {
 	Store     KeychainStore
+	Bulk      BulkStore
 	Vaults    VaultManager
 	Clipboard Clipboard
 }
@@ -63,6 +64,10 @@ func NewRootCmd(app *App) *cobra.Command {
 		newDelCmd(app),
 		newListCmd(app),
 		newVaultCmd(app),
+		newImportCmd(app),
+		newExportCmd(app),
+		newEnvCmd(app),
+		newMigrateCmd(app),
 	)
 
 	return root

@@ -299,6 +299,144 @@ func TestGet_InvalidExplicitVaultName(t *testing.T) {
 	}
 }
 
+// --- ReadRawService (migrate path) ---
+
+func TestReadRawService_ReadsArbitraryService(t *testing.T) {
+	mgr, kc := newTestManager(t)
+	kc.Set("zshrc-secrets", "GITHUB_TOKEN", "ghp_abc")
+	kc.Set("zshrc-secrets", "AWS_SECRET", "aws-secret")
+
+	entries, err := mgr.ReadRawService("zshrc-secrets")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d: %v", len(entries), entries)
+	}
+	if entries["GITHUB_TOKEN"] != "ghp_abc" {
+		t.Errorf("GITHUB_TOKEN = %q, want %q", entries["GITHUB_TOKEN"], "ghp_abc")
+	}
+	if entries["AWS_SECRET"] != "aws-secret" {
+		t.Errorf("AWS_SECRET = %q, want %q", entries["AWS_SECRET"], "aws-secret")
+	}
+}
+
+func TestReadRawService_EmptyService(t *testing.T) {
+	mgr, _ := newTestManager(t)
+
+	_, err := mgr.ReadRawService("")
+	if err == nil {
+		t.Fatal("expected error for empty service name")
+	}
+}
+
+func TestReadRawService_NoEntries(t *testing.T) {
+	mgr, _ := newTestManager(t)
+
+	entries, err := mgr.ReadRawService("nonexistent-service")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(entries))
+	}
+}
+
+// --- BulkSet (import path) ---
+
+func TestBulkSet_StoresAllEntries(t *testing.T) {
+	mgr, kc := newTestManager(t)
+	_ = mgr.Create("default")
+
+	entries := map[string]string{
+		"API_KEY": "secret1",
+		"DB_PASS": "secret2",
+		"TOKEN":   "secret3",
+	}
+
+	n, err := mgr.BulkSet(entries, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("BulkSet returned %d, want 3", n)
+	}
+
+	for k, want := range entries {
+		got, err := kc.Get("kc:default", k)
+		if err != nil {
+			t.Errorf("key %q not stored: %v", k, err)
+		}
+		if got != want {
+			t.Errorf("key %q = %q, want %q", k, got, want)
+		}
+	}
+}
+
+func TestBulkSet_ExplicitVault(t *testing.T) {
+	mgr, kc := newTestManager(t)
+	_ = mgr.Create("prod")
+
+	entries := map[string]string{"SECRET": "value"}
+	_, err := mgr.BulkSet(entries, "prod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := kc.Get("kc:prod", "SECRET")
+	if err != nil {
+		t.Fatalf("key not found: %v", err)
+	}
+	if got != "value" {
+		t.Errorf("got %q, want %q", got, "value")
+	}
+}
+
+func TestBulkSet_UnknownVault(t *testing.T) {
+	mgr, _ := newTestManager(t)
+
+	_, err := mgr.BulkSet(map[string]string{"K": "V"}, "missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// --- GetAllKeys (export/env path) ---
+
+func TestGetAllKeys_ReturnsAllKeyValues(t *testing.T) {
+	mgr, kc := newTestManager(t)
+	kc.Set("kc:default", "FOO", "bar")
+	kc.Set("kc:default", "BAZ", "qux")
+
+	entries, err := mgr.GetAllKeys("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	if entries["FOO"] != "bar" {
+		t.Errorf("FOO = %q, want %q", entries["FOO"], "bar")
+	}
+	if entries["BAZ"] != "qux" {
+		t.Errorf("BAZ = %q, want %q", entries["BAZ"], "qux")
+	}
+}
+
+func TestGetAllKeys_ExplicitVault(t *testing.T) {
+	mgr, kc := newTestManager(t)
+	_ = mgr.Create("staging")
+	kc.Set("kc:staging", "HOST", "localhost")
+
+	entries, err := mgr.GetAllKeys("staging")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entries["HOST"] != "localhost" {
+		t.Errorf("HOST = %q, want %q", entries["HOST"], "localhost")
+	}
+}
+
 // --- validateName ---
 
 func TestValidateName(t *testing.T) {

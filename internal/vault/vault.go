@@ -7,6 +7,7 @@ package vault
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -192,6 +193,65 @@ func (m *Manager) ListKeys(vaultName string) ([]string, error) {
 		return nil, err
 	}
 	return m.KC.List(ServiceName(vn))
+}
+
+// ReadRawService reads all key/value pairs from an arbitrary Keychain service without vault validation.
+func (m *Manager) ReadRawService(service string) (map[string]string, error) {
+	if service == "" {
+		return nil, ErrInvalidName
+	}
+	keys, err := m.KC.List(service)
+	if err != nil {
+		return nil, fmt.Errorf("vault: list service %q: %w", service, err)
+	}
+	result := make(map[string]string, len(keys))
+	for _, k := range keys {
+		val, err := m.KC.Get(service, k)
+		if err != nil {
+			return nil, fmt.Errorf("vault: get %q from service %q: %w", k, service, err)
+		}
+		result[k] = val
+	}
+	return result, nil
+}
+
+// BulkSet stores multiple key/value pairs into the specified vault (or active vault if empty).
+func (m *Manager) BulkSet(entries map[string]string, vaultName string) (int, error) {
+	vn, err := m.resolveVault(vaultName)
+	if err != nil {
+		return 0, err
+	}
+	svc := ServiceName(vn)
+	n := 0
+	for k, v := range entries {
+		if err := m.KC.Set(svc, k, v); err != nil {
+			return n, fmt.Errorf("vault: bulk set %q: %w", k, err)
+		}
+		n++
+	}
+	return n, nil
+}
+
+// GetAllKeys returns all key/value pairs from the specified vault (or active vault if empty).
+func (m *Manager) GetAllKeys(vaultName string) (map[string]string, error) {
+	vn, err := m.resolveVault(vaultName)
+	if err != nil {
+		return nil, err
+	}
+	svc := ServiceName(vn)
+	keys, err := m.KC.List(svc)
+	if err != nil {
+		return nil, fmt.Errorf("vault: list keys: %w", err)
+	}
+	result := make(map[string]string, len(keys))
+	for _, k := range keys {
+		val, err := m.KC.Get(svc, k)
+		if err != nil {
+			return nil, fmt.Errorf("vault: get %q: %w", k, err)
+		}
+		result[k] = val
+	}
+	return result, nil
 }
 
 // --- Helpers ---

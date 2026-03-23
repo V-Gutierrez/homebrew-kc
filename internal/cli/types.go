@@ -24,5 +24,13 @@ type Clipboard interface {
 	Copy(value string) error
 }
 
+// BulkStore extends KeychainStore with bulk operations needed for import/export/migrate.
+type BulkStore interface {
+	KeychainStore
+	BulkSet(entries map[string]string, vault string) (int, error)
+	GetAll(vault string) (map[string]string, error)
+	ReadRawService(service string) (map[string]string, error)
+}
+
 // DefaultVault is the fallback when no --vault flag and no active vault override.
 const DefaultVault = "default"

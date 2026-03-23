@@ -1,0 +1,67 @@
+package cli
+
+import (
+	"fmt"
+	"os"
+	"sort"
+
+	"github.com/spf13/cobra"
+)
+
+func newExportCmd(app *App) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Export all secrets from a vault as KEY=VALUE lines",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vault, err := app.resolveVault(cmd)
+			if err != nil {
+				return err
+			}
+			outPath, _ := cmd.Flags().GetString("output")
+
+			entries, err := app.Bulk.GetAll(vault)
+			if err != nil {
+				return fmt.Errorf("export: %w", err)
+			}
+
+			keys := sortedKeys(entries)
+			var lines []string
+			for _, k := range keys {
+				lines = append(lines, fmt.Sprintf("%s=%s", k, dotenvQuote(entries[k])))
+			}
+
+			output := joinLines(lines)
+			if outPath != "" {
+				if err := os.WriteFile(outPath, []byte(output), 0o600); err != nil {
+					return fmt.Errorf("export: write file: %w", err)
+				}
+				return nil
+			}
+			fmt.Fprint(cmd.OutOrStdout(), output)
+			return nil
+		},
+	}
+	cmd.Flags().StringP("output", "o", "", "write output to file instead of stdout")
+	return cmd
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func joinLines(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	result := ""
+	for _, l := range lines {
+		result += l + "\n"
+	}
+	return result
+}

@@ -3,6 +3,8 @@ package cli_test
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -109,9 +111,10 @@ func (m *mockClipboard) Copy(value string) error {
 
 func newTestApp() (*cli.App, *mockStore, *mockVaultManager, *mockClipboard) {
 	store := newMockStore()
+	bulk := &mockBulkStore{mockStore: store, rawServices: make(map[string]map[string]string)}
 	vaults := &mockVaultManager{vaults: []string{"default"}, active: "default"}
 	clip := &mockClipboard{}
-	app := &cli.App{Store: store, Vaults: vaults, Clipboard: clip}
+	app := &cli.App{Store: store, Bulk: bulk, Vaults: vaults, Clipboard: clip}
 	return app, store, vaults, clip
 }
 
@@ -124,6 +127,50 @@ func executeCmd(app *cli.App, args ...string) (stdout, stderr string, err error)
 	root.SetArgs(args)
 	err = root.Execute()
 	return outBuf.String(), errBuf.String(), err
+}
+
+type mockBulkStore struct {
+	*mockStore
+	rawServices map[string]map[string]string
+}
+
+func (m *mockBulkStore) BulkSet(entries map[string]string, vault string) (int, error) {
+	n := 0
+	for k, v := range entries {
+		if err := m.mockStore.Set(vault, k, v); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+func (m *mockBulkStore) GetAll(vault string) (map[string]string, error) {
+	keys, err := m.mockStore.List(vault)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(keys))
+	for _, k := range keys {
+		v, err := m.mockStore.Get(vault, k)
+		if err != nil {
+			return nil, err
+		}
+		result[k] = v
+	}
+	return result, nil
+}
+
+func (m *mockBulkStore) ReadRawService(service string) (map[string]string, error) {
+	svc, ok := m.rawServices[service]
+	if !ok {
+		return map[string]string{}, nil
+	}
+	result := make(map[string]string, len(svc))
+	for k, v := range svc {
+		result[k] = v
+	}
+	return result, nil
 }
 
 // --- Tests ---
@@ -485,5 +532,357 @@ func TestUnknownCommand(t *testing.T) {
 	_, _, err := executeCmd(app, "bogus")
 	if err == nil {
 		t.Fatal("expected error for unknown command")
+	}
+}
+
+func newTestAppWithBulk() (*cli.App, *mockStore, *mockBulkStore, *mockVaultManager) {
+	store := newMockStore()
+	bulk := &mockBulkStore{mockStore: store, rawServices: make(map[string]map[string]string)}
+	vaults := &mockVaultManager{vaults: []string{"default"}, active: "default"}
+	clip := &mockClipboard{}
+	app := &cli.App{Store: store, Bulk: bulk, Vaults: vaults, Clipboard: clip}
+	return app, store, bulk, vaults
+}
+
+func TestImportDotEnv_ActiveVault(t *testing.T) {
+	app, store, _, _ := newTestAppWithBulk()
+
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("API_KEY=secret123\nDB_PASS=pg456\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := executeCmd(app, "import", envFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "Imported 2") {
+		t.Errorf("stdout = %q, want import count message", stdout)
+	}
+
+	if val, _ := store.Get("default", "API_KEY"); val != "secret123" {
+		t.Errorf("API_KEY = %q, want %q", val, "secret123")
+	}
+	if val, _ := store.Get("default", "DB_PASS"); val != "pg456" {
+		t.Errorf("DB_PASS = %q, want %q", val, "pg456")
+	}
+}
+
+func TestImportDotEnv_ExplicitVault(t *testing.T) {
+	app, store, _, vaults := newTestAppWithBulk()
+	vaults.Create("prod")
+
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("TOKEN=abc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := executeCmd(app, "import", envFile, "--vault", "prod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if val, _ := store.Get("prod", "TOKEN"); val != "abc" {
+		t.Errorf("TOKEN = %q, want %q", val, "abc")
+	}
+}
+
+func TestImportDotEnv_ParsesQuotedValues(t *testing.T) {
+	app, store, _, _ := newTestAppWithBulk()
+
+	envFile := filepath.Join(t.TempDir(), ".env")
+	content := `SINGLE='hello world'
+DOUBLE="foo bar"
+UNQUOTED=plain
+`
+	if err := os.WriteFile(envFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := executeCmd(app, "import", envFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cases := map[string]string{
+		"SINGLE":   "hello world",
+		"DOUBLE":   "foo bar",
+		"UNQUOTED": "plain",
+	}
+	for k, want := range cases {
+		got, _ := store.Get("default", k)
+		if got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+func TestImportDotEnv_SkipsCommentsAndBlankLines(t *testing.T) {
+	app, store, _, _ := newTestAppWithBulk()
+
+	envFile := filepath.Join(t.TempDir(), ".env")
+	content := `# this is a comment
+REAL_KEY=value
+
+# another comment
+`
+	if err := os.WriteFile(envFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := executeCmd(app, "import", envFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "Imported 1") {
+		t.Errorf("stdout = %q, want Imported 1", stdout)
+	}
+	if val, _ := store.Get("default", "REAL_KEY"); val != "value" {
+		t.Errorf("REAL_KEY = %q, want %q", val, "value")
+	}
+}
+
+func TestImportDotEnv_StripsInlineComments(t *testing.T) {
+	app, store, _, _ := newTestAppWithBulk()
+
+	envFile := filepath.Join(t.TempDir(), ".env")
+	content := "PLAIN=value # trailing comment\nQUOTED=\"value # kept\"\nSINGLE='value # kept too'\n"
+	if err := os.WriteFile(envFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := executeCmd(app, "import", envFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if val, _ := store.Get("default", "PLAIN"); val != "value" {
+		t.Errorf("PLAIN = %q, want %q", val, "value")
+	}
+	if val, _ := store.Get("default", "QUOTED"); val != "value # kept" {
+		t.Errorf("QUOTED = %q, want %q", val, "value # kept")
+	}
+	if val, _ := store.Get("default", "SINGLE"); val != "value # kept too" {
+		t.Errorf("SINGLE = %q, want %q", val, "value # kept too")
+	}
+}
+
+func TestImportDotEnv_ExactReportMessage(t *testing.T) {
+	app, _, _, vaults := newTestAppWithBulk()
+	vaults.Create("prod")
+
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("TOKEN=abc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, err := executeCmd(app, "import", envFile, "--vault", "prod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := strings.TrimSpace(stdout); got != "Imported 1 keys into vault prod" {
+		t.Errorf("stdout = %q, want %q", got, "Imported 1 keys into vault prod")
+	}
+}
+
+func TestImportExportImport_RoundTripsApostrophes(t *testing.T) {
+	app, store, _, vaults := newTestAppWithBulk()
+	vaults.Create("prod")
+	store.Set("prod", "AUTHOR", "O'Reilly")
+
+	outFile := filepath.Join(t.TempDir(), "roundtrip.env")
+	_, _, err := executeCmd(app, "export", "--vault", "prod", "-o", outFile)
+	if err != nil {
+		t.Fatalf("unexpected export error: %v", err)
+	}
+
+	vaults.Create("stage")
+	_, _, err = executeCmd(app, "import", outFile, "--vault", "stage")
+	if err != nil {
+		t.Fatalf("unexpected import error: %v", err)
+	}
+
+	if got, _ := store.Get("stage", "AUTHOR"); got != "O'Reilly" {
+		t.Errorf("AUTHOR = %q, want %q", got, "O'Reilly")
+	}
+}
+
+func TestImportDotEnv_MissingFile(t *testing.T) {
+	app, _, _, _ := newTestAppWithBulk()
+
+	_, _, err := executeCmd(app, "import", "/tmp/nonexistent-kc-test.env")
+	if err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
+
+func TestExport_ActiveVault(t *testing.T) {
+	app, store, _, _ := newTestAppWithBulk()
+	store.Set("default", "FOO", "bar")
+	store.Set("default", "BAZ", "qux")
+
+	stdout, _, err := executeCmd(app, "export")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "FOO=bar") {
+		t.Errorf("stdout = %q, want FOO=bar", stdout)
+	}
+	if !strings.Contains(stdout, "BAZ=qux") {
+		t.Errorf("stdout = %q, want BAZ=qux", stdout)
+	}
+}
+
+func TestExport_ExplicitVault(t *testing.T) {
+	app, store, _, vaults := newTestAppWithBulk()
+	vaults.Create("prod")
+	store.Set("prod", "SECRET", "s3cr3t")
+
+	stdout, _, err := executeCmd(app, "export", "--vault", "prod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "SECRET=s3cr3t") {
+		t.Errorf("stdout = %q, want SECRET=s3cr3t", stdout)
+	}
+}
+
+func TestExport_OutputFile(t *testing.T) {
+	app, store, _, _ := newTestAppWithBulk()
+	store.Set("default", "KEY", "value")
+
+	outFile := filepath.Join(t.TempDir(), "out.env")
+	_, _, err := executeCmd(app, "export", "-o", outFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("output file not created: %v", err)
+	}
+	if !strings.Contains(string(data), "KEY=value") {
+		t.Errorf("output file = %q, want KEY=value", string(data))
+	}
+}
+
+func TestExport_QuotesValuesNeedingEnvEscaping(t *testing.T) {
+	app, store, _, _ := newTestAppWithBulk()
+	store.Set("default", "PLAIN", "value")
+	store.Set("default", "SPACED", "two words")
+	store.Set("default", "HASHED", "value # comment")
+	store.Set("default", "APOSTROPHE", "O'Reilly")
+
+	stdout, _, err := executeCmd(app, "export")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "PLAIN=value") {
+		t.Errorf("stdout = %q, want unquoted plain value", stdout)
+	}
+	if !strings.Contains(stdout, "SPACED=\"two words\"") {
+		t.Errorf("stdout = %q, want double-quoted spaced value", stdout)
+	}
+	if !strings.Contains(stdout, "HASHED=\"value # comment\"") {
+		t.Errorf("stdout = %q, want quoted hash value", stdout)
+	}
+	if !strings.Contains(stdout, "APOSTROPHE=\"O'Reilly\"") {
+		t.Errorf("stdout = %q, want apostrophe-safe dotenv quoting", stdout)
+	}
+}
+
+func TestEnv_ActiveVault(t *testing.T) {
+	app, store, _, _ := newTestAppWithBulk()
+	store.Set("default", "MY_VAR", "my_val")
+
+	stdout, _, err := executeCmd(app, "env")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "export MY_VAR=") {
+		t.Errorf("stdout = %q, want export MY_VAR=...", stdout)
+	}
+	if !strings.Contains(stdout, "my_val") {
+		t.Errorf("stdout = %q, want value my_val", stdout)
+	}
+}
+
+func TestEnv_ExplicitVault(t *testing.T) {
+	app, store, _, vaults := newTestAppWithBulk()
+	vaults.Create("staging")
+	store.Set("staging", "HOST", "localhost")
+
+	stdout, _, err := executeCmd(app, "env", "--vault", "staging")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "export HOST=") {
+		t.Errorf("stdout = %q, want export HOST=...", stdout)
+	}
+}
+
+func TestEnv_ShellSafeQuoting(t *testing.T) {
+	app, store, _, _ := newTestAppWithBulk()
+	store.Set("default", "SPECIAL", "has spaces & 'quotes'")
+
+	stdout, _, err := executeCmd(app, "env")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(stdout, "has spaces & 'quotes'") {
+		t.Errorf("stdout = %q, value should be quoted for shell safety", stdout)
+	}
+	if !strings.Contains(stdout, "export SPECIAL=") {
+		t.Errorf("stdout = %q, want export SPECIAL=...", stdout)
+	}
+}
+
+func TestMigrate_FromRawService(t *testing.T) {
+	app, store, bulk, vaults := newTestAppWithBulk()
+	vaults.Create("default")
+	bulk.rawServices["zshrc-secrets"] = map[string]string{
+		"GH_TOKEN": "ghp_123",
+		"AWS_KEY":  "aws_456",
+	}
+
+	stdout, _, err := executeCmd(app, "migrate", "--from", "zshrc-secrets")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stdout, "Migrated 2") {
+		t.Errorf("stdout = %q, want Migrated 2", stdout)
+	}
+
+	if val, _ := store.Get("default", "GH_TOKEN"); val != "ghp_123" {
+		t.Errorf("GH_TOKEN = %q, want %q", val, "ghp_123")
+	}
+	if val, _ := store.Get("default", "AWS_KEY"); val != "aws_456" {
+		t.Errorf("AWS_KEY = %q, want %q", val, "aws_456")
+	}
+}
+
+func TestMigrate_IntoExplicitVault(t *testing.T) {
+	app, store, bulk, vaults := newTestAppWithBulk()
+	vaults.Create("prod")
+	bulk.rawServices["legacy-app"] = map[string]string{
+		"DB_URL": "postgres://localhost/db",
+	}
+
+	_, _, err := executeCmd(app, "migrate", "--from", "legacy-app", "--vault", "prod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if val, _ := store.Get("prod", "DB_URL"); val != "postgres://localhost/db" {
+		t.Errorf("DB_URL = %q, want postgres://localhost/db", val)
+	}
+}
+
+func TestMigrate_MissingFromFlag(t *testing.T) {
+	app, _, _, _ := newTestAppWithBulk()
+	_, _, err := executeCmd(app, "migrate")
+	if err == nil {
+		t.Fatal("expected error when --from flag is missing")
 	}
 }
