@@ -1,0 +1,318 @@
+package vault
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// mockKC implements KeychainBackend for testing.
+type mockKC struct {
+	store map[string]map[string]string // service -> account -> password
+}
+
+func newMockKC() *mockKC {
+	return &mockKC{store: make(map[string]map[string]string)}
+}
+
+func (m *mockKC) Get(service, account string) (string, error) {
+	svc, ok := m.store[service]
+	if !ok {
+		return "", errors.New("not found")
+	}
+	val, ok := svc[account]
+	if !ok {
+		return "", errors.New("not found")
+	}
+	return val, nil
+}
+
+func (m *mockKC) Set(service, account, password string) error {
+	if m.store[service] == nil {
+		m.store[service] = make(map[string]string)
+	}
+	m.store[service][account] = password
+	return nil
+}
+
+func (m *mockKC) Delete(service, account string) error {
+	svc, ok := m.store[service]
+	if !ok {
+		return errors.New("not found")
+	}
+	if _, ok := svc[account]; !ok {
+		return errors.New("not found")
+	}
+	delete(svc, account)
+	return nil
+}
+
+func (m *mockKC) List(service string) ([]string, error) {
+	svc, ok := m.store[service]
+	if !ok {
+		return nil, nil
+	}
+	var keys []string
+	for k := range svc {
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
+// newTestManager creates a Manager with a temp data dir.
+func newTestManager(t *testing.T) (*Manager, *mockKC) {
+	t.Helper()
+	kc := newMockKC()
+	dir := t.TempDir()
+	return &Manager{KC: kc, DataDir: dir}, kc
+}
+
+// --- ServiceName ---
+
+func TestServiceName(t *testing.T) {
+	if got := ServiceName("prod"); got != "kc:prod" {
+		t.Fatalf("got %q, want %q", got, "kc:prod")
+	}
+	if got := ServiceName("default"); got != "kc:default" {
+		t.Fatalf("got %q, want %q", got, "kc:default")
+	}
+}
+
+// --- ActiveVault ---
+
+func TestActiveVault_Default(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	if got := mgr.ActiveVault(); got != DefaultVault {
+		t.Fatalf("got %q, want %q", got, DefaultVault)
+	}
+}
+
+func TestActiveVault_Persisted(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	// Manually write active_vault file
+	if err := os.MkdirAll(mgr.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mgr.DataDir, "active_vault"), []byte("staging\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := mgr.ActiveVault(); got != "staging" {
+		t.Fatalf("got %q, want %q", got, "staging")
+	}
+}
+
+// --- Create ---
+
+func TestCreate_Success(t *testing.T) {
+	mgr, _ := newTestManager(t)
+
+	if err := mgr.Create("staging"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	vaults, err := mgr.ListVaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vaults) != 2 {
+		t.Fatalf("expected 2 vaults, got %d: %v", len(vaults), vaults)
+	}
+}
+
+func TestCreate_Duplicate(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	_ = mgr.Create("staging")
+
+	err := mgr.Create("staging")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("expected ErrAlreadyExists, got %v", err)
+	}
+}
+
+func TestCreate_InvalidName(t *testing.T) {
+	mgr, _ := newTestManager(t)
+
+	tests := []string{"", "has space", "foo/bar", "a.b"}
+	for _, name := range tests {
+		err := mgr.Create(name)
+		if !errors.Is(err, ErrInvalidName) {
+			t.Errorf("Create(%q) = %v, want ErrInvalidName", name, err)
+		}
+	}
+}
+
+// --- ListVaults ---
+
+func TestListVaults_InitializesDefault(t *testing.T) {
+	mgr, _ := newTestManager(t)
+
+	vaults, err := mgr.ListVaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vaults) != 1 || vaults[0] != DefaultVault {
+		t.Fatalf("expected [default], got %v", vaults)
+	}
+}
+
+func TestListVaults_Sorted(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	_ = mgr.Create("zebra")
+	_ = mgr.Create("alpha")
+
+	vaults, err := mgr.ListVaults()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{"alpha", "default", "zebra"}
+	if len(vaults) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, vaults)
+	}
+	for i, v := range vaults {
+		if v != expected[i] {
+			t.Fatalf("vaults[%d] = %q, want %q", i, v, expected[i])
+		}
+	}
+}
+
+// --- Switch ---
+
+func TestSwitch_Success(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	_ = mgr.Create("staging")
+
+	if err := mgr.Switch("staging"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := mgr.ActiveVault(); got != "staging" {
+		t.Fatalf("got %q, want %q", got, "staging")
+	}
+}
+
+func TestSwitch_NotFound(t *testing.T) {
+	mgr, _ := newTestManager(t)
+
+	err := mgr.Switch("nonexistent")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestSwitch_InvalidName(t *testing.T) {
+	mgr, _ := newTestManager(t)
+
+	err := mgr.Switch("")
+	if !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("expected ErrInvalidName, got %v", err)
+	}
+}
+
+// --- CRUD pass-through ---
+
+func TestGet_UsesActiveVault(t *testing.T) {
+	mgr, kc := newTestManager(t)
+	kc.Set("kc:default", "API_KEY", "secret123")
+
+	val, err := mgr.Get("API_KEY", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if val != "secret123" {
+		t.Fatalf("got %q, want %q", val, "secret123")
+	}
+}
+
+func TestGet_UsesExplicitVault(t *testing.T) {
+	mgr, kc := newTestManager(t)
+	_ = mgr.Create("prod")
+	kc.Set("kc:prod", "DB_PASS", "prod-pass")
+
+	val, err := mgr.Get("DB_PASS", "prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if val != "prod-pass" {
+		t.Fatalf("got %q, want %q", val, "prod-pass")
+	}
+}
+
+func TestSet_UsesActiveVault(t *testing.T) {
+	mgr, kc := newTestManager(t)
+
+	if err := mgr.Set("TOKEN", "abc", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Verify it went into kc:default
+	val, err := kc.Get("kc:default", "TOKEN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if val != "abc" {
+		t.Fatalf("got %q, want %q", val, "abc")
+	}
+}
+
+func TestDelete_UsesActiveVault(t *testing.T) {
+	mgr, kc := newTestManager(t)
+	kc.Set("kc:default", "TOKEN", "xyz")
+
+	if err := mgr.Delete("TOKEN", ""); err != nil {
+		t.Fatal(err)
+	}
+	_, err := kc.Get("kc:default", "TOKEN")
+	if err == nil {
+		t.Fatal("expected error after delete")
+	}
+}
+
+func TestListKeys(t *testing.T) {
+	mgr, kc := newTestManager(t)
+	if err := mgr.Create("default"); err != nil && !errors.Is(err, ErrAlreadyExists) {
+		t.Fatal(err)
+	}
+	kc.Set("kc:default", "A", "1")
+	kc.Set("kc:default", "B", "2")
+
+	keys, err := mgr.ListKeys("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d", len(keys))
+	}
+}
+
+func TestSet_UnknownExplicitVault(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	err := mgr.Set("TOKEN", "abc", "missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestGet_InvalidExplicitVaultName(t *testing.T) {
+	mgr, _ := newTestManager(t)
+	_, err := mgr.Get("TOKEN", "bad name")
+	if !errors.Is(err, ErrInvalidName) {
+		t.Fatalf("expected ErrInvalidName, got %v", err)
+	}
+}
+
+// --- validateName ---
+
+func TestValidateName(t *testing.T) {
+	valid := []string{"default", "prod", "staging-2", "my_vault", "A1"}
+	for _, n := range valid {
+		if err := validateName(n); err != nil {
+			t.Errorf("validateName(%q) = %v, want nil", n, err)
+		}
+	}
+
+	invalid := []string{"", "has space", "a/b", "x.y", "hello!"}
+	for _, n := range invalid {
+		if err := validateName(n); !errors.Is(err, ErrInvalidName) {
+			t.Errorf("validateName(%q) = %v, want ErrInvalidName", n, err)
+		}
+	}
+}
