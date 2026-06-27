@@ -11,7 +11,7 @@ class Kc < Formula
 
   if Hardware::CPU.intel?
     url "https://github.com/v-gutierrez/kc/releases/download/v1.2.1/kc-darwin-amd64.tar.gz"
-    sha256 "6de484caf1c0a6c88e516eafbbd37d9a3c658ee06b63049a74087acb403f836a"
+    sha256 "091bb5bf1b204d38624d793f7c74fa94653e92912210ac213fb7bbbc1c5d9f86"
 
     define_method(:install) do
       bin.install "kc"
@@ -19,7 +19,7 @@ class Kc < Formula
   end
   if Hardware::CPU.arm?
     url "https://github.com/v-gutierrez/kc/releases/download/v1.2.1/kc-darwin-arm64.tar.gz"
-    sha256 "3aced791f35fb13f55ac810a3eae77a8a79355e66ee67731610501a643418919"
+    sha256 "7496f4efc849906f412f718294efec2dfcc007ae25583cca9e421bd77ebc154c"
 
     define_method(:install) do
       bin.install "kc"
